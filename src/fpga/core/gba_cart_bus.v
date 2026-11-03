@@ -90,6 +90,7 @@ localparam [3:0] S_SRD_PULSE  = 4'd11;
 localparam [3:0] S_SWR_PULSE  = 4'd12;
 localparam [3:0] S_S_HOLD     = 4'd13;
 localparam [3:0] S_DONE       = 4'd14;
+localparam [3:0] S_ABORT      = 4'd15;   // enable dropped mid-strobe
 
 reg [3:0]  state;
 reg [7:0]  cnt;
@@ -108,10 +109,19 @@ end
 
 assign busy = (state != S_IDLE);
 
+// WR# is low only in these two states. If enable drops inside one, the strobe
+// is finished properly (WR# up, data held, then released) instead of yanking
+// WR# and the data at the same instant, which could latch a floating value.
+wire in_wr_pulse = (state == S_EEWR_PULSE) || (state == S_SWR_PULSE);
+
 always @(posedge clk) begin
     done <= 1'b0;
 
-    if (!enable) begin
+    if (!enable && in_wr_pulse) begin
+        wr_n  <= 1'b1;
+        cnt   <= T_S_HOLD;
+        state <= S_ABORT;
+    end else if (!enable && state != S_ABORT) begin
         state   <= S_IDLE;
         cnt     <= 8'd0;
         ad_out  <= 16'h0000;
@@ -266,6 +276,18 @@ always @(posedge clk) begin
         S_DONE: begin
             done  <= 1'b1;
             state <= S_IDLE;
+        end
+
+        S_ABORT: begin
+            rd_n <= 1'b1;
+            wr_n <= 1'b1;
+            if (cnt == 8'd0) begin
+                ad_oe <= 1'b0;
+                hi_oe <= 1'b0;
+                cs1_n <= 1'b1;
+                cs2_n <= 1'b1;
+                state <= S_IDLE;
+            end
         end
 
         default: state <= S_IDLE;

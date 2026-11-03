@@ -14,10 +14,11 @@
 module status_screen (
     input  wire         clk,            // ~12.288 MHz pixel clock
 
-    input  wire [3:0]   status,
+    input  wire [4:0]   status,
     input  wire [2:0]   save_type,
     input  wire [7:0]   progress,
     input  wire [2:0]   err_code,
+    input  wire [2:0]   fault_code,
     input  wire [95:0]  title_flat,
     input  wire [31:0]  code_flat,
     input  wire [511:0] path_flat,
@@ -74,18 +75,25 @@ endfunction
 reg [8*24-1:0] status_str;
 always @(*) begin
     case (status)
-    4'd0:  status_str = "WAITING FOR CART POWER  ";
-    4'd1:  status_str = "READING HEADER...       ";
-    4'd2:  status_str = "NO GBA CARTRIDGE FOUND  ";
-    4'd3:  status_str = "SCANNING ROM...         ";
-    4'd4:  status_str = "NO SAVE TYPE DETECTED   ";
-    4'd5:  status_str = "READING SAVE...         ";
-    4'd6:  status_str = "EEPROM BLANK / NO REPLY ";
-    4'd7:  status_str = "WRITING FILE...         ";
-    4'd8:  status_str = "DONE - SAVE DUMPED      ";
-    4'd9:  status_str = "SD CARD FILE ERROR      ";
-    4'd10: status_str = "TOO MANY DUMPS (MAX 99) ";
-    4'd11: status_str = "SD CARD TIMEOUT         ";
+    5'd0:  status_str = "WAITING FOR CART POWER  ";
+    5'd1:  status_str = "READING HEADER...       ";
+    5'd2:  status_str = "NO GBA CARTRIDGE FOUND  ";
+    5'd3:  status_str = "SCANNING ROM...         ";
+    5'd4:  status_str = "NO SAVE TYPE DETECTED   ";
+    5'd5:  status_str = "READING SAVE...         ";
+    5'd6:  status_str = "EEPROM BLANK / NO REPLY ";
+    5'd7:  status_str = "WRITING FILE...         ";
+    5'd8:  status_str = "DONE - SAVE DUMPED      ";
+    5'd9:  status_str = "SD CARD FILE ERROR      ";
+    5'd10: status_str = "TOO MANY DUMPS (MAX 99) ";
+    5'd11: status_str = "SD CARD TIMEOUT         ";
+    5'd12: status_str = "SAFETY STOP             ";
+    5'd13: status_str = "CONFIRM: A=GO  B=CANCEL ";
+    5'd14: status_str = "UNSTABLE READ           ";
+    5'd15: status_str = "CARTRIDGE CHANGED       ";
+    5'd16: status_str = "CANCELLED               ";
+    5'd17: status_str = "VERIFYING (2ND READ)... ";
+    5'd18: status_str = "CART POWER LOST         ";
     default: status_str = "                        ";
     endcase
 end
@@ -103,9 +111,9 @@ always @(*) begin
     endcase
 end
 
-wire st_ok   = (status == 4'd8);
-wire st_bad  = (status == 4'd2) || (status == 4'd4) || (status == 4'd6) ||
-               (status >= 4'd9);
+wire st_ok   = (status == 5'd8);
+wire st_bad  = (status == 5'd2) || (status == 5'd4) || (status == 5'd6) ||
+               (status >= 5'd9 && status != 5'd13 && status != 5'd17);
 
 reg [8*12-1:0] title_p;
 reg [8*4-1:0]  code_p;
@@ -137,9 +145,27 @@ always @(*) begin
     5'd13: line_is_bar = 1'b1;
     5'd16: begin line = {"  FILE", {34{8'h20}}};                       line_color = C_DIM; end
     5'd17: line = {"  ", name_p, {2{8'h20}}};
-    5'd19: if (status == 4'd9) begin
-                 line = {"  APF ERROR CODE ", "0" + {5'd0, err_code}, {22{8'h20}}};
-                 line_color = C_BAD; end
+    5'd19: begin
+               line_color = C_BAD;
+               case (status)
+               5'd9:  line = {"  APF ERROR CODE ", "0" + {5'd0, err_code}, {22{8'h20}}};
+               5'd12: line = {"  Write guard blocked a cart write (", "0" + {5'd0, fault_code}, ")", {2{8'h20}}};
+               5'd13: begin line = {"  Sends read commands. No save data is", {2{8'h20}}}; line_color = C_FG; end
+               5'd14: line = {"  Two reads differ. Clean the contacts", {2{8'h20}}};
+               5'd15: line = {"  Cart removed or swapped during dump ", {2{8'h20}}};
+               5'd18: line = {"  Slot lost power. Power cycle Pocket ", {2{8'h20}}};
+               default: ;
+               endcase
+           end
+    5'd20: begin
+               line_color = C_FG;
+               case (status)
+               5'd12: line = {"  Nothing was written. Restart core.  ", {2{8'h20}}};
+               5'd13: line = {"  written to the cartridge.           ", {2{8'h20}}};
+               5'd14: line = {"  and press A to try again.           ", {2{8'h20}}};
+               default: ;
+               endcase
+           end
     5'd25: begin line = {"  A: run again", {26{8'h20}}};               line_color = C_DIM; end
     5'd26: begin line = {"  Power off before swapping carts", {7{8'h20}}}; line_color = C_DIM; end
     5'd27: begin line = {"  Dumps: /Assets/savesiphon/common/", {5{8'h20}}}; line_color = C_DIM; end

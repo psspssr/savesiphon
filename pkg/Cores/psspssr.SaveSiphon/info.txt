@@ -7,6 +7,9 @@ SaveSiphon (Tools). The save is read and written automatically to
 
 Existing dumps are never overwritten: a second dump gets _1, _2, ...
 Supported: SRAM 32K, Flash 64K, Flash 128K, EEPROM 512B / 8K.
-Press A to run again. Power off before swapping cartridges.
+Flash 128K and EEPROM games ask for confirmation (A = go, B = cancel).
+Every save is read twice and verified. A write guard blocks anything
+but the allowed read commands. Press A to run again.
+Power off before swapping cartridges.
 
 https://github.com/psspssr/savesiphon

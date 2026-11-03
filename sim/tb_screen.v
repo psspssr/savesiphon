@@ -5,8 +5,8 @@ reg clk = 0; always #40 clk = ~clk;
 wire [23:0] rgb; wire de, hs, vs;
 reg [511:0] path;
 initial path = {"/Assets/savesiphon/common/POKEMON_EMER-BPEE_1.sav", {15{8'h00}}};
-status_screen dut (.clk(clk), .status(4'd8), .save_type(3'd3), .progress(8'd255),
-    .err_code(3'd0), .title_flat("POKEMON EMER"), .code_flat("BPEE"), .path_flat(path),
+status_screen dut (.clk(clk), .status(5'd13), .save_type(3'd3), .progress(8'd0),
+    .err_code(3'd0), .fault_code(3'd0), .title_flat("POKEMON EMER"), .code_flat("BPEE"), .path_flat(path),
     .rgb(rgb), .de(de), .hs(hs), .vs(vs));
 integer f, n, vsn;
 initial begin

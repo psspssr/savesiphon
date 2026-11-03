@@ -11,7 +11,17 @@
 //        Flash 128K             64K, bank-select to bank 1, 64K, back to bank 0
 //        EEPROM                 serial read requests; 512 B vs 8 KiB settled by
 //                               the block-alias probe (64 wide reads)
-//   5. pick a free file name, open it with create+resize, write the buffer
+//   5. read it a second time; both CRC32s must match (3 attempts)
+//   6. re-read the header: it must be the same cart
+//   7. pick a free file name, open it with create+resize, write the buffer
+//
+// Safety:
+//   * Save types that need any command on the bus (Flash 128K bank select,
+//     EEPROM read requests) wait for the user to press A (B cancels).
+//   * The bus is released (enable low) while idle, waiting or halted.
+//   * cart_write_guard.v independently checks every WR# strobe at the pins;
+//     a refused strobe latches a fault and this sequencer stops for good.
+//   * Loss of slot power halts immediately.
 //
 // Cartridge writes, exhaustively:
 //   * Flash 128K bank select: AA->5555, 55->2AAA, B0->5555, {00|01}->0000.
@@ -36,6 +46,12 @@ module siphon_ctrl #(
     input  wire         reset_n,
     input  wire         cart_power,     // from host command 0x00B1
     input  wire         key_a,
+    input  wire         key_b,
+
+    // write guard (cart_write_guard.v)
+    output reg          permit_bank,    // Flash bank-select window
+    output reg          permit_ee,      // EEPROM read-request window
+    input  wire         guard_fault,
 
     // cart bus engine
     output reg          bus_enable,
@@ -67,7 +83,7 @@ module siphon_ctrl #(
     output reg  [31:0]  struct_q,
 
     // status for the screen
-    output reg  [3:0]   status,
+    output reg  [4:0]   status,
     output reg  [2:0]   save_type,
     output reg  [7:0]   progress,
     output reg  [2:0]   err_code,
@@ -88,10 +104,13 @@ assign tgt_slotoffset = 32'd0;
 assign tgt_bridgeaddr = BUF_BASE;
 
 // status codes (status_screen.v has the strings)
-localparam [3:0] ST_S_POWER   = 4'd0,  ST_S_HEADER  = 4'd1,  ST_S_NOCART = 4'd2,
-                 ST_S_SCAN    = 4'd3,  ST_S_NOSAVE  = 4'd4,  ST_S_READ   = 4'd5,
-                 ST_S_BLANK   = 4'd6,  ST_S_WRITE   = 4'd7,  ST_S_DONE   = 4'd8,
-                 ST_S_FILEERR = 4'd9,  ST_S_TOOMANY = 4'd10, ST_S_TIMEOUT= 4'd11;
+localparam [4:0] ST_S_POWER   = 5'd0,  ST_S_HEADER  = 5'd1,  ST_S_NOCART = 5'd2,
+                 ST_S_SCAN    = 5'd3,  ST_S_NOSAVE  = 5'd4,  ST_S_READ   = 5'd5,
+                 ST_S_BLANK   = 5'd6,  ST_S_WRITE   = 5'd7,  ST_S_DONE   = 5'd8,
+                 ST_S_FILEERR = 5'd9,  ST_S_TOOMANY = 5'd10, ST_S_TIMEOUT= 5'd11,
+                 ST_S_SAFETY  = 5'd12, ST_S_CONFIRM = 5'd13, ST_S_UNSTABLE = 5'd14,
+                 ST_S_CHANGED = 5'd15, ST_S_CANCEL  = 5'd16, ST_S_VERIFY = 5'd17,
+                 ST_S_PWRLOST = 5'd18;
 
 // save types
 localparam [2:0] SV_NONE = 3'd0, SV_SRAM = 3'd1, SV_FLASH64 = 3'd2,
@@ -143,7 +162,11 @@ localparam [5:0]
     S_WRITE_FILE  = 6'd35,
     S_WRITE_FILE_R= 6'd36,
     S_TGT_WAIT    = 6'd37,
-    S_HALT        = 6'd38;
+    S_HALT        = 6'd38,
+    S_CONFIRM     = 6'd39,
+    S_READ_BEGIN  = 6'd40,
+    S_PASS_END    = 6'd41,
+    S_HDRV_START  = 6'd42;
 
 reg [5:0]  state, ret;
 reg [27:0] timer;
@@ -195,7 +218,27 @@ reg [31:0] open_size;
 reg        tgt_seen;
 reg [5:0]  tgt_ret;
 
-reg        key_a_1;
+reg        key_a_1, key_b_1;
+
+// safety
+reg [5:0]  settle_ret;
+reg [5:0]  confirm_next;
+reg        pass;                // 0: read into buffer, 1: verify read
+reg [1:0]  retries;
+reg [31:0] crc, crc1;
+reg        hdr_verify, hdr_mismatch;
+reg        power_seen;
+
+function [31:0] crc32_byte;
+    input [31:0] c;
+    input [7:0]  b;
+    integer n;
+    begin
+        crc32_byte = c ^ {24'd0, b};
+        for (n = 0; n < 8; n = n + 1)
+            crc32_byte = crc32_byte[0] ? ((crc32_byte >> 1) ^ 32'hEDB88320) : (crc32_byte >> 1);
+    end
+endfunction
 
 // ------------------------------------------------------------------ helpers
 genvar gi;
@@ -338,20 +381,21 @@ task push_byte;
     input [7:0] b;
     begin
         pack     <= {pack[15:0], b};
-        if (byte_idx[1:0] == 2'd3) begin
+        crc      <= crc32_byte(crc, b);
+        if (byte_idx[1:0] == 2'd3 && !pass) begin
             buf_we    <= 1'b1;
             buf_waddr <= byte_idx[16:2];
             buf_wdata <= {pack, b};
         end
         byte_idx <= byte_idx + 17'd1;
-        if (b != 8'hFF) seen_non_ff <= 1'b1;
-        if (b != 8'h00) seen_non_00 <= 1'b1;
+        if (b != 8'hFF && !pass) seen_non_ff <= 1'b1;
+        if (b != 8'h00 && !pass) seen_non_00 <= 1'b1;
         progress <= {byte_idx, 8'd0} >> size_log2;
     end
 endtask
 
 task fail;
-    input [3:0] st;
+    input [4:0] st;
     begin
         status <= st;
         state  <= S_HALT;
@@ -367,6 +411,7 @@ always @(posedge clk) begin
     tgt_openfile <= 1'b0;
     tgt_write    <= 1'b0;
     key_a_1      <= key_a;
+    key_b_1      <= key_b;
     if (timer != 28'd0) timer <= timer - 28'd1;
 
     if (!reset_n) begin
@@ -380,9 +425,30 @@ always @(posedge clk) begin
         open_flags <= 32'd0;
         open_size  <= 32'd0;
         tgt_length <= 32'd0;
+        permit_bank <= 1'b0;
+        permit_ee  <= 1'b0;
+        power_seen <= 1'b0;
+        pass       <= 1'b0;
+        hdr_verify <= 1'b0;
+        settle_ret <= S_HDR_START;
         for (k = 0; k < 64; k = k + 1) path[k] <= 8'h00;
         for (k = 0; k < 32; k = k + 1) hdr[k] <= 8'h00;
+    end else if (guard_fault && state != S_HALT) begin
+        // the write guard refused a strobe: stop everything, for good
+        bus_enable  <= 1'b0;
+        permit_bank <= 1'b0;
+        permit_ee   <= 1'b0;
+        status      <= ST_S_SAFETY;
+        state       <= S_HALT;
+    end else if (power_seen && !cart_power && state != S_HALT) begin
+        // the slot lost power (or the cart was pulled): stop driving pins
+        bus_enable  <= 1'b0;
+        permit_bank <= 1'b0;
+        permit_ee   <= 1'b0;
+        status      <= ST_S_PWRLOST;
+        state       <= S_HALT;
     end else begin
+        if (cart_power) power_seen <= 1'b1;
         case (state)
         S_RESET: begin
             timer <= T_POWER_WAIT;
@@ -395,11 +461,12 @@ always @(posedge clk) begin
             if (cart_power || timer == 28'd0) begin
                 bus_enable <= 1'b1;
                 timer      <= T_SETTLE;
+                settle_ret <= S_HDR_START;
                 state      <= S_SETTLE;
             end
         end
 
-        S_SETTLE: if (timer == 28'd0) state <= S_HDR_START;
+        S_SETTLE: if (timer == 28'd0) state <= settle_ret;
 
         S_BUSWAIT: if (bus_done) state <= ret;
 
@@ -412,12 +479,21 @@ always @(posedge clk) begin
             hidx      <= 7'd0;
             logo      <= 32'd0;
             hsum      <= 8'd0;
+            hdr_verify <= 1'b0;
+            pass      <= 1'b0;
             for (k = 0; k < 64; k = k + 1) path[k] <= 8'h00;
             issue(OP_ROM_LATCH, 24'd0, 8'd0, S_HDR_RD);
         end
         S_HDR_RD: issue(OP_ROM_RD, 24'd0, 8'd0, S_HDR_GOT);
         S_HDR_GOT: begin
             // halfword hidx = bytes 2*hidx (low) and 2*hidx+1 (high)
+            if (hdr_verify) begin
+                // second header read after the dump: must match the first
+                if (hidx == 7'd2 && {bus_rdata[7:0], bus_rdata[15:8]} != logo[31:16]) hdr_mismatch <= 1'b1;
+                if (hidx == 7'd3 && {bus_rdata[7:0], bus_rdata[15:8]} != logo[15:0])  hdr_mismatch <= 1'b1;
+                if (hidx >= 7'h50 && (hdr[{hidx[3:0], 1'b0}] != bus_rdata[7:0] ||
+                                      hdr[{hidx[3:0], 1'b1}] != bus_rdata[15:8]))   hdr_mismatch <= 1'b1;
+            end else begin
             if (hidx == 7'd2) logo[31:16] <= {bus_rdata[7:0], bus_rdata[15:8]};
             if (hidx == 7'd3) logo[15:0]  <= {bus_rdata[7:0], bus_rdata[15:8]};
             if (hidx >= 7'h50) begin
@@ -429,6 +505,7 @@ always @(posedge clk) begin
                 else if (hidx == 7'h5E)
                     hsum <= hsum + bus_rdata[7:0];
             end
+            end
             if (hidx == 7'h5F) begin
                 issue(OP_ROM_END, 24'd0, 8'd0, S_HDR_CHECK);
             end else begin
@@ -437,7 +514,10 @@ always @(posedge clk) begin
             end
         end
         S_HDR_CHECK: begin
-            if (!hdr_ok) begin
+            if (hdr_verify) begin
+                if (hdr_mismatch) fail(ST_S_CHANGED);
+                else              state <= S_SAVE_END;
+            end else if (!hdr_ok) begin
                 fail(ST_S_NOCART);
             end else begin
                 status    <= ST_S_SCAN;
@@ -495,18 +575,24 @@ always @(posedge clk) begin
             seen_non_ff <= 1'b0;
             seen_non_00 <= 1'b0;
             status      <= ST_S_READ;
+            pass        <= 1'b0;
+            retries     <= 2'd0;
             if (f_flash1m) begin
+                // needs bank-select commands: ask first
                 save_type <= SV_FLASH128; save_size <= 18'h20000; size_log2 <= 5'd17;
-                state <= S_SAVE_RD;
+                confirm_next <= S_READ_BEGIN;
+                state <= S_CONFIRM;
             end else if (f_flash64) begin
                 save_type <= SV_FLASH64;  save_size <= 18'h10000; size_log2 <= 5'd16;
-                state <= S_SAVE_RD;
+                state <= S_READ_BEGIN;
             end else if (f_sram) begin
                 save_type <= SV_SRAM;     save_size <= 18'h08000; size_log2 <= 5'd15;
-                state <= S_SAVE_RD;
+                state <= S_READ_BEGIN;
             end else if (f_eeprom) begin
+                // needs serial read requests: ask first
                 save_type <= SV_EEPROM;
-                state <= S_EE_PROBE;
+                confirm_next <= S_EE_PROBE;
+                state <= S_CONFIRM;
             end else begin
                 fail(ST_S_NOSAVE);
             end
@@ -520,13 +606,15 @@ always @(posedge clk) begin
             if ({1'b0, saddr} + 18'd1 == save_size) begin
                 if (save_type == SV_FLASH128) begin
                     // leave the chip on bank 0, as a GBA would find it
-                    bank_seq <= 2'd0; bank_target <= 1'b0; bank_ret <= S_SAVE_END;
+                    bank_seq <= 2'd0; bank_target <= 1'b0; bank_ret <= S_PASS_END;
+                    permit_bank <= 1'b1;
                     state <= S_BANK;
                 end else begin
-                    state <= S_SAVE_END;
+                    state <= S_PASS_END;
                 end
             end else if (save_type == SV_FLASH128 && saddr == 17'h0FFFF) begin
                 bank_seq <= 2'd0; bank_target <= 1'b1; bank_ret <= S_SAVE_RD;
+                permit_bank <= 1'b1;
                 state <= S_BANK;
             end else begin
                 state <= S_SAVE_RD;
@@ -535,7 +623,12 @@ always @(posedge clk) begin
         S_BANK: issue(OP_SAVE_WR, {8'd0, bank_addr}, bank_data, S_BANK_NEXT);
         S_BANK_NEXT: begin
             bank_seq <= bank_seq + 2'd1;
-            state    <= (bank_seq == 2'd3) ? bank_ret : S_BANK;
+            if (bank_seq == 2'd3) begin
+                permit_bank <= 1'b0;
+                state       <= bank_ret;
+            end else begin
+                state       <= S_BANK;
+            end
         end
 
         // ---------------------------------------------------- EEPROM block read
@@ -548,14 +641,17 @@ always @(posedge clk) begin
             else
                 ee_req <= {2'b11, ee_blk[5:0], 1'b0, 8'd0};
             ee_reqn <= 5'd0;
+            permit_ee <= 1'b1;
             issue(OP_ROM_LATCH, EE_ADDR, 8'd0, S_EE_REQ);
         end
         S_EE_REQ: issue(OP_EE_WR, EE_ADDR, {7'd0, ee_req[16]}, S_EE_REQ_NEXT);
         S_EE_REQ_NEXT: begin
             ee_req  <= {ee_req[15:0], 1'b0};
             ee_reqn <= ee_reqn + 5'd1;
-            if (ee_reqn + 5'd1 == ((ee_flush || ee_bits == 4'd14) ? 5'd17 : 5'd9))
+            if (ee_reqn + 5'd1 == ((ee_flush || ee_bits == 4'd14) ? 5'd17 : 5'd9)) begin
+                permit_ee <= 1'b0;
                 issue(OP_ROM_END, 24'd0, 8'd0, S_EE_RLATCH);
+            end
             else
                 state <= S_EE_REQ;
         end
@@ -592,8 +688,7 @@ always @(posedge clk) begin
                 if (ee_diff || (ee_data != ee_ref)) begin
                     save_type <= SV_EEPROM8K; save_size <= 18'h02000; size_log2 <= 5'd13;
                     ee_bits <= 4'd14; ee_nblk <= 11'd1024;
-                    ee_blk  <= 10'd0;
-                    state   <= S_EE_DUMP;
+                    state   <= S_READ_BEGIN;
                 end else begin
                     // narrow chip, possibly mid-command after the wide reads:
                     // flush with zeros and drain one data phase first
@@ -610,12 +705,10 @@ always @(posedge clk) begin
         end
         S_EE_FLUSH_DONE: begin
             ee_flush <= 1'b0;
-            ee_blk   <= 10'd0;
-            state    <= S_EE_DUMP;
+            state    <= S_READ_BEGIN;
         end
         S_EE_DUMP: begin
-            progress <= 8'd0;
-            byte_idx <= 17'd0;
+            ee_blk   <= 10'd0;
             ee_ret   <= S_EE_PUSH;
             ee_k     <= 3'd0;
             state    <= S_EE_BLK;
@@ -627,12 +720,68 @@ always @(posedge clk) begin
             if (ee_k == 3'd7) begin
                 ee_k <= 3'd0;
                 if ({1'b0, ee_blk} + 11'd1 == ee_nblk) begin
-                    state <= S_SAVE_END;
+                    state <= S_PASS_END;
                 end else begin
                     ee_blk <= ee_blk + 10'd1;
                     state  <= S_EE_BLK;
                 end
             end
+        end
+
+        // ---------------------------------------------------- safety
+        // Flash 128K / EEPROM: the bus is released while waiting for the user
+        S_CONFIRM: begin
+            bus_enable <= 1'b0;
+            status     <= ST_S_CONFIRM;
+            if (key_a && !key_a_1) begin
+                status     <= ST_S_READ;
+                bus_enable <= 1'b1;
+                timer      <= T_SETTLE;
+                settle_ret <= confirm_next;
+                state      <= S_SETTLE;
+            end else if (key_b && !key_b_1) begin
+                fail(ST_S_CANCEL);
+            end
+        end
+
+        // every save is read twice; both CRC32s must match
+        S_READ_BEGIN: begin
+            byte_idx <= 17'd0;
+            saddr    <= 17'd0;
+            crc      <= 32'hFFFF_FFFF;
+            progress <= 8'd0;
+            status   <= pass ? ST_S_VERIFY : ST_S_READ;
+            if (!pass) begin
+                seen_non_ff <= 1'b0;
+                seen_non_00 <= 1'b0;
+            end
+            if (save_type == SV_EEPROM512 || save_type == SV_EEPROM8K)
+                state <= S_EE_DUMP;
+            else
+                state <= S_SAVE_RD;
+        end
+        S_PASS_END: begin
+            if (!pass) begin
+                crc1  <= crc;
+                pass  <= 1'b1;
+                state <= S_READ_BEGIN;
+            end else if (crc == crc1) begin
+                state <= S_HDRV_START;
+            end else if (retries != 2'd2) begin
+                retries <= retries + 2'd1;
+                pass    <= 1'b0;
+                state   <= S_READ_BEGIN;
+            end else begin
+                fail(ST_S_UNSTABLE);
+            end
+        end
+
+        // the cart must still be the same cart
+        S_HDRV_START: begin
+            hdr_verify   <= 1'b1;
+            hdr_mismatch <= 1'b0;
+            hidx         <= 7'd0;
+            issue(OP_ROM_LATCH, 24'd0, 8'd0, S_HDR_RD);
         end
 
         // ---------------------------------------------------- file
@@ -742,9 +891,18 @@ always @(posedge clk) begin
 
         // ---------------------------------------------------- terminal
         S_HALT: begin
-            // A runs the whole thing again (same cart; swap carts only with
-            // the Pocket powered off)
-            if (key_a && !key_a_1) state <= S_HDR_START;
+            // pins released while idle. A runs everything again (same cart;
+            // swap carts only with the Pocket powered off). A safety stop or
+            // power loss needs a core restart.
+            bus_enable  <= 1'b0;
+            permit_bank <= 1'b0;
+            permit_ee   <= 1'b0;
+            if (key_a && !key_a_1 && status != ST_S_SAFETY && status != ST_S_PWRLOST) begin
+                bus_enable <= 1'b1;
+                timer      <= T_SETTLE;
+                settle_ret <= S_HDR_START;
+                state      <= S_SETTLE;
+            end
         end
 
         default: state <= S_RESET;

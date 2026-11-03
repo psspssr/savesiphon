@@ -7,8 +7,13 @@
                 "mappings": [
                     {
                         "id": 0,
-                        "name": "Run Again",
+                        "name": "Continue / Run Again",
                         "key": "pad_btn_a"
+                    },
+                    {
+                        "id": 1,
+                        "name": "Cancel",
+                        "key": "pad_btn_b"
                     }
                 ]
             }

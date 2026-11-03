@@ -242,6 +242,10 @@ input   wire    [15:0]  cont4_trig
     wire    [7:0]   bus_hi_out;
     wire            bus_hi_oe;
     wire            bus_cs1_n, bus_cs2_n, bus_rd_n, bus_wr_n;
+    wire            guard_wr_n;         // WR# after the write guard
+    wire            guard_fault;
+    wire    [2:0]   guard_fault_code;
+    wire            permit_bank, permit_ee;
     reg     [31:0]  buf_q;
     wire    [31:0]  struct_q;
 
@@ -263,7 +267,8 @@ assign cart_tran_bank1     = bus_hi_oe ? bus_hi_out : 8'hzz;         // A[23:16]
 assign cart_tran_bank1_dir = bus_hi_oe;
 // strobes are always driven so nothing floats into a write
 // {PHI, WR#, RD#, CS1#}
-assign cart_tran_bank0     = {1'b0, bus_wr_n, bus_rd_n, bus_cs1_n};
+// WR# only ever comes from cart_write_guard, never straight from the engine
+assign cart_tran_bank0     = {1'b0, guard_wr_n, bus_rd_n, bus_cs1_n};
 assign cart_tran_bank0_dir = 1'b1;
 // CS2# (save chip select). Before the engine owns the slot, leave it to the hw
 assign cart_tran_pin30     = bus_enable ? bus_cs2_n : 1'b0;
@@ -546,6 +551,26 @@ gba_cart_bus cart_bus (
     .wr_n       ( bus_wr_n )
 );
 
+// independent write guard on WR#: refuses anything but the Flash bank-select
+// sequence and EEPROM read requests, and latches a fault until core reset
+cart_write_guard guard (
+    .clk         ( clk_74a ),
+    .reset_n     ( reset_n ),
+    .permit_bank ( permit_bank ),
+    .permit_ee   ( permit_ee ),
+    .cs1_n       ( bus_cs1_n ),
+    .cs2_n       ( bus_cs2_n ),
+    .rd_n        ( bus_rd_n ),
+    .wr_n        ( bus_wr_n ),
+    .ad_out      ( bus_ad_out ),
+    .ad_oe       ( bus_ad_oe ),
+    .hi_out      ( bus_hi_out ),
+    .hi_oe       ( bus_hi_oe ),
+    .wr_n_pin    ( guard_wr_n ),
+    .fault       ( guard_fault ),
+    .fault_code  ( guard_fault_code )
+);
+
 // save buffer: 32K x 32 (128 KiB), written by the sequencer, read by APF
     wire            buf_we;
     wire    [14:0]  buf_waddr;
@@ -556,7 +581,7 @@ always @(posedge clk_74a) begin
     buf_q <= save_buf[bridge_addr[16:2]];
 end
 
-    wire    [3:0]   st_status;
+    wire    [4:0]   st_status;
     wire    [2:0]   st_save_type;
     wire    [7:0]   st_progress;
     wire    [2:0]   st_err_code;
@@ -569,6 +594,11 @@ siphon_ctrl ctrl (
     .reset_n            ( reset_n ),
     .cart_power         ( cart_power ),
     .key_a              ( cont1_key[4] ),
+    .key_b              ( cont1_key[5] ),
+
+    .permit_bank        ( permit_bank ),
+    .permit_ee          ( permit_ee ),
+    .guard_fault        ( guard_fault ),
 
     .bus_enable         ( bus_enable ),
     .bus_start          ( bus_start ),
@@ -615,6 +645,7 @@ status_screen screen (
     .save_type  ( st_save_type ),
     .progress   ( st_progress ),
     .err_code   ( st_err_code ),
+    .fault_code ( guard_fault_code ),
     .title_flat ( st_title ),
     .code_flat  ( st_code ),
     .path_flat  ( st_path ),

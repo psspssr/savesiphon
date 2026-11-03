@@ -739,6 +739,7 @@ set_global_assignment -name QIP_FILE apf/apf.qip
 set_global_assignment -name VERILOG_FILE core/core_top.v
 set_global_assignment -name VERILOG_FILE core/core_bridge_cmd.v
 set_global_assignment -name VERILOG_FILE core/gba_cart_bus.v
+set_global_assignment -name VERILOG_FILE core/cart_write_guard.v
 set_global_assignment -name VERILOG_FILE core/siphon_ctrl.v
 set_global_assignment -name VERILOG_FILE core/status_screen.v
 set_global_assignment -name SDC_FILE core/core_constraints.sdc
