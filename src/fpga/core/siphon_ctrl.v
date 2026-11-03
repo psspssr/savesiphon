@@ -81,6 +81,10 @@ module siphon_ctrl #(
     // open_dataslot_file_t, read over the bridge
     input  wire [7:0]   struct_word_addr,
     output reg  [31:0]  struct_q,
+    // byte order APF reads core memory in: 1 = byte 0 in [7:0] (measured on
+    // hardware by openfpga-carttools), 0 = byte 0 in [31:24]. Applies to the
+    // struct and to the save buffer, so path and data always agree.
+    output reg          le_mode,
 
     // status for the screen
     output reg  [4:0]   status,
@@ -228,6 +232,7 @@ reg [1:0]  retries;
 reg [31:0] crc, crc1;
 reg        hdr_verify, hdr_mismatch;
 reg        power_seen;
+reg        le_tried_be;
 
 function [31:0] crc32_byte;
     input [31:0] c;
@@ -271,8 +276,11 @@ end
 function [7:0] fname_char;
     input [7:0] c;
     begin
-        if ((c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9"))
+        // only A-Z 0-9 _ : the set proven to be accepted on real cards
+        if ((c >= "A" && c <= "Z") || (c >= "0" && c <= "9"))
             fname_char = c;
+        else if (c >= "a" && c <= "z")
+            fname_char = c - 8'h20;
         else
             fname_char = "_";
     end
@@ -322,7 +330,7 @@ always @(*) begin
             b_char = fname_char(hdr[bstep - 6'd26]);
         end
     end else if (bstep == 6'd38) begin
-        b_char = "-";
+        b_char = "_";
     end else if (bstep < 6'd43) begin
         b_char = fname_char(hdr[12 + bstep - 6'd39]);
     end else if (bstep == 6'd43) begin
@@ -350,13 +358,20 @@ end
 
 // struct readback: path bytes, then flags at 0x100 and size at 0x104
 always @(posedge clk) begin
+    // the struct is a little-endian byte image: in le_mode byte 0 sits in
+    // [7:0] and the u32 fields are plain; otherwise everything is mirrored
     if (struct_word_addr < 8'd16)
-        struct_q <= {path[{struct_word_addr[3:0], 2'd0}], path[{struct_word_addr[3:0], 2'd1}],
-                     path[{struct_word_addr[3:0], 2'd2}], path[{struct_word_addr[3:0], 2'd3}]};
+        struct_q <= le_mode ?
+            {path[{struct_word_addr[3:0], 2'd3}], path[{struct_word_addr[3:0], 2'd2}],
+             path[{struct_word_addr[3:0], 2'd1}], path[{struct_word_addr[3:0], 2'd0}]} :
+            {path[{struct_word_addr[3:0], 2'd0}], path[{struct_word_addr[3:0], 2'd1}],
+             path[{struct_word_addr[3:0], 2'd2}], path[{struct_word_addr[3:0], 2'd3}]};
     else if (struct_word_addr == 8'h40)
-        struct_q <= open_flags;
+        struct_q <= le_mode ? open_flags :
+            {open_flags[7:0], open_flags[15:8], open_flags[23:16], open_flags[31:24]};
     else if (struct_word_addr == 8'h41)
-        struct_q <= open_size;
+        struct_q <= le_mode ? open_size :
+            {open_size[7:0], open_size[15:8], open_size[23:16], open_size[31:24]};
     else
         struct_q <= 32'd0;
 end
@@ -428,6 +443,8 @@ always @(posedge clk) begin
         permit_bank <= 1'b0;
         permit_ee  <= 1'b0;
         power_seen <= 1'b0;
+        le_mode    <= 1'b1;
+        le_tried_be <= 1'b0;
         pass       <= 1'b0;
         hdr_verify <= 1'b0;
         settle_ret <= S_HDR_START;
@@ -823,6 +840,12 @@ always @(posedge clk) begin
         S_OPEN_PROBE_R: begin
             if (tgt_err == 3'd3) begin
                 state <= S_OPEN_CREATE;
+            end else if (tgt_err == 3'd4 && !le_tried_be) begin
+                // "malformed path": APF read the struct in the other byte
+                // order. Flip once (data follows) and ask again.
+                le_mode     <= ~le_mode;
+                le_tried_be <= 1'b1;
+                state       <= S_OPEN_PROBE;
             end else if (tgt_err == 3'd0) begin
                 // taken: next suffix
                 if (sfx_tens == 4'd9 && sfx_ones == 4'd9) begin

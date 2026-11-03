@@ -14,6 +14,11 @@
 `ifndef CART_TYPE
 `define CART_TYPE 3
 `endif
+// byte order the mock APF reads core memory in: 1 = byte 0 in [7:0] (what the
+// real Pocket does), 0 = byte 0 in [31:24]
+`ifndef APF_LE
+`define APF_LE 1
+`endif
 
 module tb;
 
@@ -52,6 +57,7 @@ reg         tgt_ack = 0, tgt_done = 0;
 reg  [2:0]  tgt_err = 0;
 reg  [7:0]  struct_word_addr = 0;
 wire [31:0] struct_q;
+wire        le_mode;
 
 wire [4:0]  status;
 wire [2:0]  save_type;
@@ -90,7 +96,7 @@ siphon_ctrl #(
     .tgt_slotoffset(tgt_slotoffset), .tgt_bridgeaddr(tgt_bridgeaddr),
     .tgt_length(tgt_length), .tgt_ack(tgt_ack), .tgt_done(tgt_done),
     .tgt_err(tgt_err),
-    .struct_word_addr(struct_word_addr), .struct_q(struct_q),
+    .struct_word_addr(struct_word_addr), .struct_q(struct_q), .le_mode(le_mode),
     .status(status), .save_type(save_type), .progress(progress),
     .err_code(err_code), .title_flat(title_flat), .code_flat(code_flat),
     .path_flat(path_flat));
@@ -230,7 +236,8 @@ task read_struct;
         for (w = 0; w < 16; w = w + 1) begin
             struct_word_addr = w;
             @(posedge clk); @(posedge clk); #1;
-            path_str[511-32*w -: 32] = struct_q;
+            path_str[511-32*w -: 32] = `APF_LE ?
+                {struct_q[7:0], struct_q[15:8], struct_q[23:16], struct_q[31:24]} : struct_q;
         end
     end
 endtask
@@ -245,11 +252,16 @@ always @(posedge clk) begin
         fork : f_open
         begin
             read_struct;
-            struct_word_addr = 8'h40; @(posedge clk); @(posedge clk); #1; flags_w = struct_q;
-            struct_word_addr = 8'h41; @(posedge clk); @(posedge clk); #1; size_w = struct_q;
+            // u32 fields are little-endian inside the byte image
+            struct_word_addr = 8'h40; @(posedge clk); @(posedge clk); #1;
+            flags_w = `APF_LE ? struct_q : {struct_q[7:0], struct_q[15:8], struct_q[23:16], struct_q[31:24]};
+            struct_word_addr = 8'h41; @(posedge clk); @(posedge clk); #1;
+            size_w  = `APF_LE ? struct_q : {struct_q[7:0], struct_q[15:8], struct_q[23:16], struct_q[31:24]};
             opens = opens + 1;
             $display("  open #%0d flags=%h size=%h path=\"%0s\"", opens, flags_w, size_w, path_str);
-            if (flags_w == 0) begin
+            if (path_str[511 -: 64] != "/Assets/") begin
+                apf_reply(3'd4);            // malformed path
+            end else if (flags_w == 0) begin
                 if (existing > 0) begin existing = existing - 1; apf_reply(3'd0); end
                 else apf_reply(3'd3);
             end else begin
@@ -366,6 +378,7 @@ always @(posedge clk) if (status !== last_status) begin
 end
 
 reg [7:0] got;
+reg [31:0] bw;
 initial begin
     wait (reset_n);
     wait (ctrl.state == 6'd38);     // S_HALT
@@ -388,12 +401,16 @@ initial begin
             $display("ERROR: write len %0d expected %0d", wrote_len, exp_size); errors = errors + 1;
         end
         if (size_w != exp_size) begin $display("ERROR: open size %h", size_w); errors = errors + 1; end
-        if (final_path[511 -: 8*27] != "/Assets/savesiphon/common/P") begin
+        if (final_path[511 -: 8*49] != "/Assets/savesiphon/common/POKEMON_EMER_BPEE_1.sav") begin
             $display("ERROR: path prefix"); errors = errors + 1;
         end
         $display("  final path: \"%0s\"", final_path);
         for (i = 0; i < exp_size; i = i + 1) begin
-            got = save_buf[i >> 2][31 - 8*(i & 3) -: 8];
+            // what APF would put in the file: bridge word (as core_top
+            // presents it) taken apart in APF's byte order
+            bw  = le_mode ? {save_buf[i >> 2][7:0], save_buf[i >> 2][15:8],
+                             save_buf[i >> 2][23:16], save_buf[i >> 2][31:24]} : save_buf[i >> 2];
+            got = `APF_LE ? bw[8*(i & 3) +: 8] : bw[31 - 8*(i & 3) -: 8];
             if (got !== ((CT >= 4) ? eep[i] : sav[i])) begin
                 if (errors < 20) $display("ERROR: byte %0d got %h expected %h", i, got,
                                           (CT >= 4) ? eep[i] : sav[i]);
@@ -403,8 +420,8 @@ initial begin
         if (bus_enable) begin $display("ERROR: bus still enabled after halt"); errors = errors + 1; end
         if (CT == 3 && fl_bank != 0) begin $display("ERROR: flash left on bank 1"); errors = errors + 1; end
     end
-    if (errors == 0) $display("PASS cart_type=%0d", CT);
-    else             $display("FAIL cart_type=%0d errors=%0d", CT, errors);
+    if (errors == 0) $display("PASS cart_type=%0d apf_le=%0d", CT, `APF_LE);
+    else             $display("FAIL cart_type=%0d apf_le=%0d errors=%0d", CT, `APF_LE, errors);
     $finish;
 end
 

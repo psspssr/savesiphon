@@ -248,6 +248,7 @@ input   wire    [15:0]  cont4_trig
     wire            permit_bank, permit_ee;
     reg     [31:0]  buf_q;
     wire    [31:0]  struct_q;
+    wire            le_mode;
 
 // not using the IR port, so turn off both the LED, and
 // disable the receive circuit to save power
@@ -345,7 +346,9 @@ always @(*) begin
         bridge_rd_data <= 0;
     end
     32'h40xxxxxx: begin
-        bridge_rd_data <= buf_q;        // save dump buffer
+        // save dump buffer, stored byte 0 in [31:24]; mirrored to match the
+        // byte order APF reads in (siphon_ctrl.le_mode)
+        bridge_rd_data <= le_mode ? {buf_q[7:0], buf_q[15:8], buf_q[23:16], buf_q[31:24]} : buf_q;
     end
     32'h50xxxxxx: begin
         bridge_rd_data <= struct_q;     // open_dataslot_file_t
@@ -624,6 +627,7 @@ siphon_ctrl ctrl (
 
     .struct_word_addr   ( bridge_addr[9:2] ),
     .struct_q           ( struct_q ),
+    .le_mode            ( le_mode ),
 
     .status             ( st_status ),
     .save_type          ( st_save_type ),
