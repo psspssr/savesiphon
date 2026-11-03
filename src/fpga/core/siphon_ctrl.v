@@ -157,7 +157,7 @@ localparam [6:0]
     S_ROM_NEXT = 7'd74, S_ROM_FINISH = 7'd75, S_ACT_DONE = 7'd76,
     S_GB_ROM_SEL = 7'd77, S_GB_ROM_RD = 7'd78, S_GB_ROM_GOT = 7'd79,
     S_MODE_SWITCH = 7'd80, S_GB_ROM_RESTORE = 7'd81, S_FILE_OPEN = 7'd82,
-    S_ROM_OPENED = 7'd83, S_HDRV_DONE = 7'd84, S_GB_RAM_END = 7'd85;
+    S_ROM_OPENED = 7'd83, S_HDRV_DONE = 7'd84, S_GB_RAM_END = 7'd85, S_BUILD2 = 7'd86;
 
 reg [6:0]  state, ret;
 reg [27:0] timer;
@@ -207,6 +207,7 @@ reg [4:0]  cand;            // log2 of candidate size
 reg [1:0]  pt;              // sample point
 reg        all_end;
 reg [15:0] h0, h1, m0, m1;
+reg [1:0]  rsz_ready;
 
 // GB
 reg        gb_has_ram;
@@ -360,20 +361,34 @@ end
 
 // ------------------------------------------------------------------ ROM probe points
 // point k of candidate S: S + k*S/4 + k*0x246 (bytes); its image wrapped by S
-wire [25:0] cand_s   = 26'd1 << cand;
-wire [25:0] pt_off   = ({24'd0, pt} * (cand_s >> 2)) + ({24'd0, pt} * 26'h246);
-wire [25:0] pt_addr  = cand_s + pt_off;
-wire [25:0] pt_wrap  = pt_addr & (cand_s - 26'd1);
+// registered (one wait state after pt/cand change) to keep this off the
+// FSM's critical path
+reg  [25:0] cand_s, pt_addr, pt_wrap;
+wire [25:0] q_s    = cand_s >> 2;
+wire [25:0] pt_off = (pt[0] ? q_s : 26'd0) + (pt[1] ? (q_s << 1) : 26'd0) +
+                     (pt[0] ? 26'h246 : 26'd0) + (pt[1] ? 26'h48C : 26'd0);
+always @(posedge clk) begin
+    cand_s  <= 26'd1 << cand;
+    pt_addr <= cand_s + pt_off;
+    pt_wrap <= (cand_s + pt_off) & (cand_s - 26'd1);
+end
 wire [15:0] pt_a16   = pt_addr[16:1];
 wire [15:0] pt_w16   = pt_wrap[16:1];
 wire        pt_open  = (h0 == pt_a16) && (h1 != pt_a16 + 16'd1);
 wire        ref_open = (m0 == pt_w16) && (m1 != pt_w16 + 16'd1);
 wire        pt_mirror= (h0 == m0) && (h1 == m1) && (h0 != h1) && !ref_open;
 
+// progress for the bar, computed off the FSM path
+reg [7:0] prog_save, prog_rom;
+always @(posedge clk) begin
+    prog_save <= {byte_idx, 8'd0} >> size_log2;
+    prog_rom  <= ({chunk, 8'd0} + 18'd256) >> (is_gba ? (rom_log2 - 5'd16) : (rom_log2 - 5'd14));
+end
+
 // ------------------------------------------------------------------ path builder
-reg [7:0] b_char;
-reg       b_emit;
-reg       b_last;
+reg [7:0] b_char, b_char_r;
+reg       b_emit, b_emit_r;
+reg       b_last, b_last_r;
 reg [3:0] b_i;
 always @(*) begin
     b_char = 8'h00;
@@ -734,15 +749,20 @@ always @(posedge clk) begin
             status <= ST_S_SIZING;
             cand   <= ROM_PROBE_MIN;
             pt     <= 2'd0;
+            rsz_ready <= 2'd0;
             all_end<= 1'b1;
             state  <= S_RSZ_PT;
         end
         S_RSZ_PT: begin
+            if (rsz_ready != 2'd3) begin
+                rsz_ready <= rsz_ready + 2'd1;     // let cand_s / pt_addr settle
+            end else
             // EEPROM carts answer at 16 MiB and up; they are at most 16 MiB
             if (cand == 5'd24 && f_eeprom && !(f_flash1m | f_flash64 | f_sram)) begin
                 rom_log2 <= 5'd24;
                 state    <= S_MENU;
             end else begin
+                rsz_ready <= 2'd0;
                 issue(OP_ROM_LATCH, pt_addr[24:1], 8'd0, S_RSZ_H0);
             end
         end
@@ -962,7 +982,7 @@ always @(posedge clk) begin
         S_SAVE_RD: issue(OP_SAVE_RD, {8'd0, saddr[15:0]}, 8'd0, S_SAVE_GOT);
         S_SAVE_GOT: begin
             push_byte(bus_rdata[7:0]);
-            progress <= {byte_idx, 8'd0} >> size_log2;
+            progress <= prog_save;
             saddr <= saddr + 17'd1;
             if ({1'b0, saddr} + 18'd1 == save_size) begin
                 if (save_label == SV_FLASH128) begin
@@ -1065,7 +1085,7 @@ always @(posedge clk) begin
         end
         S_EE_PUSH: begin
             push_byte(ee_data[63:56]);
-            progress <= {byte_idx, 8'd0} >> size_log2;
+            progress <= prog_save;
             ee_data <= {ee_data[55:0], 8'd0};
             ee_k    <= ee_k + 3'd1;
             if (ee_k == 3'd7) begin
@@ -1102,7 +1122,7 @@ always @(posedge clk) begin
         S_GB_RAM_GOT: begin
             // MBC2 RAM is 4 bits wide; the upper nibble floats
             push_byte(mapper == M_MBC2 ? {4'hF, bus_rdata[3:0]} : bus_rdata[7:0]);
-            progress <= {byte_idx, 8'd0} >> size_log2;
+            progress <= prog_save;
             if (gb_off + 14'd1 == gb_bank_bytes) begin
                 if (gb_bank + 5'd1 == gb_ram_banks) begin
                     state <= S_GB_RAM_END;
@@ -1257,7 +1277,7 @@ always @(posedge clk) begin
             end
         end
         S_ROM_NEXT: begin
-            progress <= ({chunk, 8'd0} + 18'd256) >> (is_gba ? (rom_log2 - 5'd16) : (rom_log2 - 5'd14));
+            progress <= prog_rom;
             status   <= ST_S_ROMREAD;
             if (chunk + 10'd1 == nchunks) begin
                 state <= S_ROM_FINISH;
@@ -1316,12 +1336,21 @@ always @(posedge clk) begin
             state    <= S_BUILD;
         end
         S_BUILD: begin
-            if (b_emit) begin
-                path[pidx] <= b_char;
+            b_char_r <= b_char;
+            b_emit_r <= b_emit;
+            b_last_r <= b_last;
+            state    <= S_BUILD2;
+        end
+        S_BUILD2: begin
+            if (b_emit_r) begin
+                path[pidx] <= b_char_r;
                 pidx <= pidx + 6'd1;
             end
-            if (b_last) state <= S_OPEN_PROBE;
-            else        bstep <= bstep + 6'd1;
+            if (b_last_r) state <= S_OPEN_PROBE;
+            else begin
+                bstep <= bstep + 6'd1;
+                state <= S_BUILD;
+            end
         end
         S_OPEN_PROBE: begin
             open_flags   <= 32'd0;

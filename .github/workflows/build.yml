@@ -35,11 +35,35 @@ jobs:
           docker run --rm -v "${{ github.workspace }}:/build" -w /build/src/fpga \
             raetro/quartus:21.1 quartus_sh --flow compile ap_core
 
+      - name: Worst paths
+        if: always()
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/build" -w /build/src/fpga \
+            raetro/quartus:21.1 quartus_sta -t ../../scripts/report_timing.tcl || true
+          head -60 src/fpga/output_files/worst_paths.txt || true
+
       - name: Timing summary
         if: always()
         run: |
           grep -A12 "Slow 1100mV 85C Model Setup Summary" src/fpga/output_files/ap_core.sta.rpt || true
           grep -A6 "Fitter Status" src/fpga/output_files/ap_core.fit.summary || true
+
+      - name: Require positive slack
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          rpt = open("src/fpga/output_files/ap_core.sta.rpt").read()
+          bad = [l for l in rpt.splitlines() if re.match(r"^; \S.*; -\d", l) and "Setup" not in l]
+          sec = rpt.split("Setup Summary")
+          worst = []
+          for chunk in sec[1:]:
+              for l in chunk.splitlines()[3:12]:
+                  m = re.match(r"^; (.+?)\s+; (-?[\d.]+)\s+;", l)
+                  if m: worst.append((m.group(1).strip(), float(m.group(2))))
+          neg = [w for w in worst if w[1] < 0]
+          print("setup slack:", worst)
+          sys.exit(1 if neg else 0)
+          PY
 
       - name: Package
         id: pkg
