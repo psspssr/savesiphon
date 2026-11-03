@@ -1,0 +1,4 @@
+dist/
+*.ppm
+sim/*.vvp
+.DS_Store

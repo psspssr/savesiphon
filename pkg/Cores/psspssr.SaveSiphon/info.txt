@@ -1,0 +1,12 @@
+SaveSiphon - GBA cartridge save dumper
+
+Insert a GBA cartridge with the Pocket powered off, power on and launch
+SaveSiphon (Tools). The save is read and written automatically to
+
+  /Assets/savesiphon/common/<TITLE>-<CODE>.sav
+
+Existing dumps are never overwritten: a second dump gets _1, _2, ...
+Supported: SRAM 32K, Flash 64K, Flash 128K, EEPROM 512B / 8K.
+Press A to run again. Power off before swapping cartridges.
+
+https://github.com/psspssr/savesiphon
