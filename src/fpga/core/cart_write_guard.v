@@ -18,6 +18,12 @@
 //       0 0 0 ...                (flush: every bit 0)
 //   so an EEPROM write command (1 0 ...) can never be formed.
 //
+// Game Boy mode (gb_mode high), only while permit_mbc is high:
+//   mapper register writes to 0000-7FFF with /CS high (cartridge RAM is not
+//   selected), and in 0000-1FFF only the values 0A (RAM enable) and 00 (RAM
+//   disable). A write with /CS low or to 8000-FFFF - i.e. to cartridge RAM -
+//   is refused. The GBA rules are off in GB mode and vice versa.
+//
 // Also faults, at any time:
 //   CS1# and CS2# low together; RD# and WR# low together; any change of
 //   address, data or chip select while WR# is low.
@@ -35,6 +41,8 @@ module cart_write_guard (
 
     input  wire         permit_bank,
     input  wire         permit_ee,
+    input  wire         gb_mode,
+    input  wire         permit_mbc,
 
     // from gba_cart_bus
     input  wire         cs1_n,
@@ -50,7 +58,7 @@ module cart_write_guard (
     output reg          wr_n_pin,
 
     output reg          fault,
-    output reg  [2:0]   fault_code      // 1 cs2 write, 2 ee write, 3 bus, 4 unstable
+    output reg  [2:0]   fault_code      // 1 cs2 write, 2 ee write, 3 bus, 4 unstable, 5 gb write
 );
 
 // expected Flash bank-select step
@@ -72,18 +80,22 @@ reg  [23:0] cs1_latch;
 reg  [4:0]  ee_idx;
 reg         ee_first;
 
-wire bank_ok = permit_bank && !cs2_n && cs1_n && rd_n &&
+wire bank_ok = !gb_mode && permit_bank && !cs2_n && cs1_n && rd_n &&
                ad_oe && hi_oe && (ad_out == exp_addr) && data_ok;
 
 wire ee_bit  = ad_out[0];
-wire ee_ok   = permit_ee && !cs1_n && cs2_n && rd_n &&
+wire ee_ok   = !gb_mode && permit_ee && !cs1_n && cs2_n && rd_n &&
                ad_oe && hi_oe && (hi_out == 8'hFF) && (ad_out[15:1] == 15'd0) &&
                (cs1_latch == 24'hFFFF80) && (ee_idx < 5'd17) &&
                ( (ee_idx == 5'd0) ||
                  (ee_first  && (ee_idx != 5'd1 || ee_bit)) ||   // request: 2nd bit is 1
                  (!ee_first && !ee_bit) );                       // flush: all zero
 
-wire write_ok = bank_ok || ee_ok;
+wire gb_ok   = gb_mode && permit_mbc && cs1_n && cs2_n && rd_n &&
+               ad_oe && hi_oe && !ad_out[15] &&
+               (ad_out[15:13] != 3'b000 || hi_out == 8'h00 || hi_out == 8'h0A);
+
+wire write_ok = bank_ok || ee_ok || gb_ok;
 
 // snapshot of everything that must not move while WR# is low
 reg         active;
@@ -129,7 +141,7 @@ always @(posedge clk) begin
             end else begin
                 wr_n_pin   <= 1'b1;
                 fault      <= 1'b1;
-                fault_code <= !cs2_n ? 3'd1 : 3'd2;
+                fault_code <= gb_mode ? 3'd5 : !cs2_n ? 3'd1 : 3'd2;
             end
         end else if (!wr_n && active) begin
             if (now != snap) begin
@@ -142,7 +154,9 @@ always @(posedge clk) begin
             // strobe finished: advance the allowed sequence
             wr_n_pin <= 1'b1;
             active   <= 1'b0;
-            if (!snap[32]) begin                // was a CS2# write
+            if (gb_mode) begin
+                // mapper write finished; nothing to sequence
+            end else if (!snap[32]) begin       // was a CS2# write
                 bank_step <= bank_step + 2'd1;
             end else begin                      // CS1# EEPROM bit
                 if (ee_idx == 5'd0) ee_first <= snap[16];   // ad_out[0] in snapshot

@@ -1,15 +1,16 @@
-SaveSiphon - GBA cartridge save dumper
+SaveSiphon - cartridge backup for GB, GBC and GBA
 
-Insert a GBA cartridge with the Pocket powered off, power on and launch
-SaveSiphon (Tools). The save is read and written automatically to
+Insert a cartridge with the Pocket powered off, power on and launch
+SaveSiphon. Choose Back up save, Back up ROM or Back up save + ROM.
+Files go to /Assets/savesiphon/common/ and are never overwritten
+(a second backup gets _1, _2, ...).
 
-  /Assets/savesiphon/common/<TITLE>-<CODE>.sav
+GBA saves: SRAM, Flash 64K/128K, EEPROM 512B/8K. GB/GBC: MBC1/2/3/5 RAM.
+Read-only: cartridge save data is never written. Commands needed to
+read some carts (Flash bank select, EEPROM read requests, GB mapper
+banking) are confirmed first, and a hardware write guard blocks
+anything else. Every read is done twice and verified.
 
-Existing dumps are never overwritten: a second dump gets _1, _2, ...
-Supported: SRAM 32K, Flash 64K, Flash 128K, EEPROM 512B / 8K.
-Flash 128K and EEPROM games ask for confirmation (A = go, B = cancel).
-Every save is read twice and verified. A write guard blocks anything
-but the allowed read commands. Press A to run again.
 Power off before swapping cartridges.
 
 https://github.com/psspssr/savesiphon

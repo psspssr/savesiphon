@@ -29,7 +29,9 @@
 
 `default_nettype none
 
-module gba_cart_bus (
+module gba_cart_bus #(
+    parameter integer TSCALE = 1   // simulation only: divide every timing
+) (
     input  wire         clk,
     input  wire         enable,     // low: every pin idle, FSM held in reset
 
@@ -63,17 +65,17 @@ localparam [2:0] OP_SAVE_RD   = 3'd5;
 localparam [2:0] OP_SAVE_WR   = 3'd6;
 
 // timings, clk_74a cycles
-localparam [7:0] T_ADDR    = 8'd8;    // address valid before CS1# falls
-localparam [7:0] T_LATCH   = 8'd8;    // CS1# low with address still driven
-localparam [7:0] T_TURN    = 8'd4;    // AD released before RD# falls
-localparam [7:0] T_ROM_RD  = 8'd14;   // RD# low, ROM   (~190 ns)
-localparam [7:0] T_ROM_RH  = 8'd6;    // RD# high after a ROM read
-localparam [7:0] T_EE_STB  = 8'd40;   // RD#/WR# low, EEPROM (~540 ns)
-localparam [7:0] T_EE_GAP  = 8'd20;   // strobe high, EEPROM
-localparam [7:0] T_S_SETUP = 8'd10;   // save: address before CS2#/strobe
-localparam [7:0] T_S_STB   = 8'd48;   // save: RD#/WR# low (~650 ns)
-localparam [7:0] T_S_HOLD  = 8'd10;   // save: hold after strobe rises
-localparam [7:0] T_IDLE    = 8'd8;    // after CS1# rises
+localparam [7:0] T_ADDR = (8 / TSCALE > 1) ? 8 / TSCALE : 8'd1;    // address valid before CS1# falls
+localparam [7:0] T_LATCH = (8 / TSCALE > 1) ? 8 / TSCALE : 8'd1;    // CS1# low with address still driven
+localparam [7:0] T_TURN = (4 / TSCALE > 1) ? 4 / TSCALE : 8'd1;    // AD released before RD# falls
+localparam [7:0] T_ROM_RD = (14 / TSCALE > 1) ? 14 / TSCALE : 8'd1;   // RD# low, ROM   (~190 ns)
+localparam [7:0] T_ROM_RH = (6 / TSCALE > 1) ? 6 / TSCALE : 8'd1;    // RD# high after a ROM read
+localparam [7:0] T_EE_STB = (40 / TSCALE > 1) ? 40 / TSCALE : 8'd1;   // RD#/WR# low, EEPROM (~540 ns)
+localparam [7:0] T_EE_GAP = (20 / TSCALE > 1) ? 20 / TSCALE : 8'd1;   // strobe high, EEPROM
+localparam [7:0] T_S_SETUP = (10 / TSCALE > 1) ? 10 / TSCALE : 8'd1;   // save: address before CS2#/strobe
+localparam [7:0] T_S_STB = (48 / TSCALE > 1) ? 48 / TSCALE : 8'd1;   // save: RD#/WR# low (~650 ns)
+localparam [7:0] T_S_HOLD = (10 / TSCALE > 1) ? 10 / TSCALE : 8'd1;   // save: hold after strobe rises
+localparam [7:0] T_IDLE = (8 / TSCALE > 1) ? 8 / TSCALE : 8'd1;    // after CS1# rises
 
 localparam [3:0] S_IDLE       = 4'd0;
 localparam [3:0] S_LAT_ADDR   = 4'd1;

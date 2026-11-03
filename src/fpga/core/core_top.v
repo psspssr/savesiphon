@@ -241,11 +241,12 @@ input   wire    [15:0]  cont4_trig
     wire            bus_ad_oe;
     wire    [7:0]   bus_hi_out;
     wire            bus_hi_oe;
-    wire            bus_cs1_n, bus_cs2_n, bus_rd_n, bus_wr_n;
+    wire            bus_cs1_n, bus_cs2_n, bus_rd_n, bus_wr_n, bus_phi;
+    wire            bus_mode;           // 0 GBA, 1 GB/GBC
     wire            guard_wr_n;         // WR# after the write guard
     wire            guard_fault;
     wire    [2:0]   guard_fault_code;
-    wire            permit_bank, permit_ee;
+    wire            permit_bank, permit_ee, permit_mbc;
     reg     [31:0]  buf_q;
     wire    [31:0]  struct_q;
     wire            le_mode;
@@ -258,7 +259,7 @@ assign port_ir_rx_disable = 1;
 // bridge endianness
 assign bridge_endian_little = 0;
 
-// cartridge: GBA bus driven by gba_cart_bus (see below)
+// cartridge: driven by gba_cart_bus or gb_cart_bus (bus_mode), see below
 // directions are 0:IN, 1:OUT; direction is per bank
 assign cart_tran_bank3     = bus_ad_oe ? bus_ad_out[7:0]  : 8'hzz;   // AD[7:0]
 assign cart_tran_bank3_dir = bus_ad_oe;
@@ -267,12 +268,13 @@ assign cart_tran_bank2_dir = bus_ad_oe;
 assign cart_tran_bank1     = bus_hi_oe ? bus_hi_out : 8'hzz;         // A[23:16] / D[7:0]
 assign cart_tran_bank1_dir = bus_hi_oe;
 // strobes are always driven so nothing floats into a write
-// {PHI, WR#, RD#, CS1#}
-// WR# only ever comes from cart_write_guard, never straight from the engine
-assign cart_tran_bank0     = {1'b0, guard_wr_n, bus_rd_n, bus_cs1_n};
+// {PHI, WR#, RD#, CS1#}   (GB: {CLK, /WR, /RD, /CS})
+// WR# only ever comes from cart_write_guard, never straight from an engine
+assign cart_tran_bank0     = {bus_phi, guard_wr_n, bus_rd_n, bus_cs1_n};
 assign cart_tran_bank0_dir = 1'b1;
-// CS2# (save chip select). Before the engine owns the slot, leave it to the hw
-assign cart_tran_pin30     = bus_enable ? bus_cs2_n : 1'b0;
+// pin 30: GBA CS2# (save chip select) / GB /RESET (held high).
+// Before an engine owns the slot, leave it to the hardware.
+assign cart_tran_pin30     = bus_enable ? (bus_mode ? 1'b1 : bus_cs2_n) : 1'b0;
 assign cart_tran_pin30_dir = bus_enable ? 1'b1 : 1'bz;
 assign cart_pin30_pwroff_reset = bus_enable;
 assign cart_tran_pin31     = 1'bz;      // IRQ, input only
@@ -532,35 +534,91 @@ core_bridge_cmd icb (
 
 // (bus wires declared at the top of the module)
 
+// ---- GBA engine
+    wire    [15:0]  gba_rdata;
+    wire            gba_done, gba_busy;
+    wire    [15:0]  gba_ad_out;
+    wire            gba_ad_oe;
+    wire    [7:0]   gba_hi_out;
+    wire            gba_hi_oe;
+    wire            gba_cs1_n, gba_cs2_n, gba_rd_n, gba_wr_n;
+
 gba_cart_bus cart_bus (
     .clk        ( clk_74a ),
-    .enable     ( bus_enable ),
-    .start      ( bus_start ),
+    .enable     ( bus_enable & ~bus_mode ),
+    .start      ( bus_start & ~bus_mode ),
     .op         ( bus_op ),
     .addr       ( bus_addr ),
     .wdata      ( bus_wdata ),
-    .rdata      ( bus_rdata ),
-    .done       ( bus_done ),
-    .busy       ( bus_busy ),
-    .ad_out     ( bus_ad_out ),
-    .ad_oe      ( bus_ad_oe ),
+    .rdata      ( gba_rdata ),
+    .done       ( gba_done ),
+    .busy       ( gba_busy ),
+    .ad_out     ( gba_ad_out ),
+    .ad_oe      ( gba_ad_oe ),
     .ad_in      ( {cart_tran_bank2, cart_tran_bank3} ),
-    .hi_out     ( bus_hi_out ),
-    .hi_oe      ( bus_hi_oe ),
+    .hi_out     ( gba_hi_out ),
+    .hi_oe      ( gba_hi_oe ),
     .hi_in      ( cart_tran_bank1 ),
-    .cs1_n      ( bus_cs1_n ),
-    .cs2_n      ( bus_cs2_n ),
-    .rd_n       ( bus_rd_n ),
-    .wr_n       ( bus_wr_n )
+    .cs1_n      ( gba_cs1_n ),
+    .cs2_n      ( gba_cs2_n ),
+    .rd_n       ( gba_rd_n ),
+    .wr_n       ( gba_wr_n )
 );
 
-// independent write guard on WR#: refuses anything but the Flash bank-select
-// sequence and EEPROM read requests, and latches a fault until core reset
+// ---- Game Boy engine
+    wire    [7:0]   gb_rdata;
+    wire            gb_done;
+    wire    [15:0]  gb_ad_out;
+    wire            gb_ad_oe;
+    wire    [7:0]   gb_hi_out;
+    wire            gb_hi_oe;
+    wire            gb_cs_n, gb_rd_n, gb_wr_n, gb_phi;
+
+gb_cart_bus gb_bus (
+    .clk        ( clk_74a ),
+    .enable     ( bus_enable & bus_mode ),
+    .start      ( bus_start & bus_mode ),
+    .op         ( bus_op ),
+    .addr       ( bus_addr[15:0] ),
+    .wdata      ( bus_wdata ),
+    .rdata      ( gb_rdata ),
+    .done       ( gb_done ),
+    .ad_out     ( gb_ad_out ),
+    .ad_oe      ( gb_ad_oe ),
+    .hi_out     ( gb_hi_out ),
+    .hi_oe      ( gb_hi_oe ),
+    .hi_in      ( cart_tran_bank1 ),
+    .cs_n       ( gb_cs_n ),
+    .rd_n       ( gb_rd_n ),
+    .wr_n       ( gb_wr_n ),
+    .phi        ( gb_phi )
+);
+
+// ---- pin mux: exactly one engine owns the connector (the other is held in
+// reset by its enable), and the write guard sees whatever reaches the pins
+assign bus_rdata  = bus_mode ? {8'd0, gb_rdata} : gba_rdata;
+assign bus_done   = bus_mode ? gb_done   : gba_done;
+assign bus_busy   = bus_mode ? 1'b0      : gba_busy;
+assign bus_ad_out = bus_mode ? gb_ad_out : gba_ad_out;
+assign bus_ad_oe  = bus_enable & (bus_mode ? gb_ad_oe : gba_ad_oe);
+assign bus_hi_out = bus_mode ? gb_hi_out : gba_hi_out;
+assign bus_hi_oe  = bus_enable & (bus_mode ? gb_hi_oe : gba_hi_oe);
+assign bus_cs1_n  = bus_mode ? gb_cs_n   : gba_cs1_n;
+assign bus_cs2_n  = bus_mode ? 1'b1      : gba_cs2_n;
+assign bus_rd_n   = bus_mode ? gb_rd_n   : gba_rd_n;
+assign bus_wr_n   = bus_mode ? gb_wr_n   : gba_wr_n;
+assign bus_phi    = bus_mode ? gb_phi    : 1'b0;
+
+// independent write guard on WR#: refuses anything but the GBA Flash
+// bank-select sequence, GBA EEPROM read requests and GB mapper-register
+// writes, and latches a fault until core reset
 cart_write_guard guard (
     .clk         ( clk_74a ),
     .reset_n     ( reset_n ),
     .permit_bank ( permit_bank ),
     .permit_ee   ( permit_ee ),
+    .gb_mode     ( bus_mode ),
+    .permit_mbc  ( permit_mbc ),
     .cs1_n       ( bus_cs1_n ),
     .cs2_n       ( bus_cs2_n ),
     .rd_n        ( bus_rd_n ),
@@ -574,7 +632,7 @@ cart_write_guard guard (
     .fault_code  ( guard_fault_code )
 );
 
-// save buffer: 32K x 32 (128 KiB), written by the sequencer, read by APF
+// buffer: 32K x 32 (128 KiB), written by the sequencer, read by APF
     wire            buf_we;
     wire    [14:0]  buf_waddr;
     wire    [31:0]  buf_wdata;
@@ -584,13 +642,21 @@ always @(posedge clk_74a) begin
     buf_q <= save_buf[bridge_addr[16:2]];
 end
 
-    wire    [4:0]   st_status;
-    wire    [2:0]   st_save_type;
-    wire    [7:0]   st_progress;
-    wire    [2:0]   st_err_code;
-    wire    [95:0]  st_title;
-    wire    [31:0]  st_code;
-    wire    [511:0] st_path;
+    wire    [2:0]   ui_mode;
+    wire    [1:0]   ui_menu_sel;
+    wire    [4:0]   ui_status;
+    wire    [7:0]   ui_progress;
+    wire    [2:0]   ui_err_code;
+    wire    [1:0]   ui_cart_kind;
+    wire    [127:0] ui_name;
+    wire    [4:0]   ui_name_len;
+    wire    [31:0]  ui_code;
+    wire            ui_code_len;
+    wire    [3:0]   ui_save_label;
+    wire    [4:0]   ui_rom_log2;
+    wire    [2:0]   ui_mapper;
+    wire    [1:0]   ui_done_what;
+    wire    [511:0] ui_path;
 
 siphon_ctrl ctrl (
     .clk                ( clk_74a ),
@@ -598,12 +664,16 @@ siphon_ctrl ctrl (
     .cart_power         ( cart_power ),
     .key_a              ( cont1_key[4] ),
     .key_b              ( cont1_key[5] ),
+    .key_up             ( cont1_key[0] ),
+    .key_down           ( cont1_key[1] ),
 
     .permit_bank        ( permit_bank ),
     .permit_ee          ( permit_ee ),
+    .permit_mbc         ( permit_mbc ),
     .guard_fault        ( guard_fault ),
 
     .bus_enable         ( bus_enable ),
+    .bus_mode           ( bus_mode ),
     .bus_start          ( bus_start ),
     .bus_op             ( bus_op ),
     .bus_addr           ( bus_addr ),
@@ -629,13 +699,21 @@ siphon_ctrl ctrl (
     .struct_q           ( struct_q ),
     .le_mode            ( le_mode ),
 
-    .status             ( st_status ),
-    .save_type          ( st_save_type ),
-    .progress           ( st_progress ),
-    .err_code           ( st_err_code ),
-    .title_flat         ( st_title ),
-    .code_flat          ( st_code ),
-    .path_flat          ( st_path )
+    .ui_mode            ( ui_mode ),
+    .menu_sel           ( ui_menu_sel ),
+    .status             ( ui_status ),
+    .progress           ( ui_progress ),
+    .err_code           ( ui_err_code ),
+    .cart_kind          ( ui_cart_kind ),
+    .name_flat          ( ui_name ),
+    .name_len           ( ui_name_len ),
+    .code_flat          ( ui_code ),
+    .code_len           ( ui_code_len ),
+    .save_label         ( ui_save_label ),
+    .rom_log2           ( ui_rom_log2 ),
+    .mapper             ( ui_mapper ),
+    .done_what          ( ui_done_what ),
+    .path_flat          ( ui_path )
 );
 
 // video: 320x240 status screen on the 12.288 MHz pixel clock
@@ -645,14 +723,22 @@ assign video_skip = 1'b0;
 
 status_screen screen (
     .clk        ( clk_core_12288 ),
-    .status     ( st_status ),
-    .save_type  ( st_save_type ),
-    .progress   ( st_progress ),
-    .err_code   ( st_err_code ),
+    .ui_mode    ( ui_mode ),
+    .menu_sel   ( ui_menu_sel ),
+    .status     ( ui_status ),
+    .progress   ( ui_progress ),
+    .err_code   ( ui_err_code ),
     .fault_code ( guard_fault_code ),
-    .title_flat ( st_title ),
-    .code_flat  ( st_code ),
-    .path_flat  ( st_path ),
+    .cart_kind  ( ui_cart_kind ),
+    .name_flat  ( ui_name ),
+    .name_len   ( ui_name_len ),
+    .code_flat  ( ui_code ),
+    .code_len   ( ui_code_len ),
+    .save_label ( ui_save_label ),
+    .rom_log2   ( ui_rom_log2 ),
+    .mapper     ( ui_mapper ),
+    .done_what  ( ui_done_what ),
+    .path_flat  ( ui_path ),
     .rgb        ( video_rgb ),
     .de         ( video_de ),
     .hs         ( video_hs ),

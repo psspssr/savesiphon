@@ -7,13 +7,23 @@
                 "mappings": [
                     {
                         "id": 0,
-                        "name": "Continue / Run Again",
+                        "name": "Select",
                         "key": "pad_btn_a"
                     },
                     {
                         "id": 1,
-                        "name": "Cancel",
+                        "name": "Back",
                         "key": "pad_btn_b"
+                    },
+                    {
+                        "id": 2,
+                        "name": "Up",
+                        "key": "pad_up"
+                    },
+                    {
+                        "id": 3,
+                        "name": "Down",
+                        "key": "pad_down"
                     }
                 ]
             }

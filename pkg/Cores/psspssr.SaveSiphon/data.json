@@ -10,7 +10,7 @@
                 "deferload": true,
                 "extensions": ["sav"],
                 "address": "0x40000000",
-                "size_maximum": "0x20000"
+                "size_maximum": "0x2000000"
             }
         ]
     }

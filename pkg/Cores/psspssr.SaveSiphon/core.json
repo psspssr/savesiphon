@@ -2,9 +2,11 @@
     "core": {
         "magic": "APF_VER_1",
         "metadata": {
-            "platform_ids": ["savesiphon"],
+            "platform_ids": [
+                "savesiphon"
+            ],
             "shortname": "SaveSiphon",
-            "description": "Dumps the save from a physical GBA cartridge to the SD card.",
+            "description": "Back up saves and ROMs from physical GB, GBC and GBA cartridges to the SD card.",
             "author": "psspssr",
             "url": "https://github.com/psspssr/savesiphon",
             "version": "0.1.0",
